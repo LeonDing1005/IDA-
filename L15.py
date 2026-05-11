@@ -1,6 +1,7 @@
 import json
 import html
 import base64
+import hashlib
 import mimetypes
 import time
 from pathlib import Path
@@ -75,6 +76,11 @@ DEFAULT_ANALYSIS_PROMPT = """
 """
 
 CHART_CODE_PROMPT = """
+Font rule:
+- The execution namespace provides FONT_PATH, CHINESE_FONT_PROP, and CHINESE_FONT_NAME.
+- Do not use SimHei or any other system font name.
+- Use CHINESE_FONT_NAME in rcParams, and pass fontproperties=CHINESE_FONT_PROP to titles, labels, legends, tick labels, and annotations when possible.
+
 你是一名严谨的数据可视化 Python 工程师。请根据当前数据画像、原始分析问题、当前分析结果和用户反馈，生成一段可执行的 matplotlib 绘图代码。
 
 你只能返回严格 JSON：
@@ -96,6 +102,11 @@ CHART_CODE_PROMPT = """
 """
 
 PROMPT_TEMPLATE = f"""
+Font rule for charts:
+- Always load the Chinese font from `{FONT_PATH.as_posix()}` with matplotlib.font_manager.
+- Do not use SimHei or a generic sans-serif Chinese fallback.
+- Set matplotlib rcParams from the loaded local font name before drawing Chinese text.
+
 你扮演“数据分析助理”。仅可对已经注入的 Pandas DataFrame `df` 进行只读分析与绘图：
 - 严禁修改 `df` 原始数据；如需派生请使用副本，例如 `tmp = df.copy()`。
 - 任何图表必须使用 matplotlib，并保存到本地目录 `{ARTIFACTS_DIR.as_posix()}/`。
@@ -376,7 +387,9 @@ def generate_verified_chart_result(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    setup_chinese_font()
+    chinese_font_prop = setup_chinese_font()
+    if chinese_font_prop:
+        code = code.replace('"SimHei"', "CHINESE_FONT_NAME").replace("'SimHei'", "CHINESE_FONT_NAME")
     namespace = {
         "df": df,
         "pd": pd,
@@ -385,6 +398,8 @@ def generate_verified_chart_result(
         "ARTIFACTS_DIR": ARTIFACTS_DIR,
         "OUTPUT_TABLE_DIR": OUTPUT_TABLE_DIR,
         "FONT_PATH": FONT_PATH,
+        "CHINESE_FONT_PROP": chinese_font_prop,
+        "CHINESE_FONT_NAME": chinese_font_prop.get_name() if chinese_font_prop else "",
     }
     try:
         exec(code, {"__builtins__": __builtins__}, namespace)
@@ -706,14 +721,25 @@ def public_analysis_log(analysis_log: list[dict]) -> list[dict]:
     return [{key: value for key, value in item.items() if not key.startswith("_")} for item in analysis_log]
 
 
-def setup_chinese_font() -> None:
+def setup_chinese_font():
     import matplotlib.pyplot as plt
     from matplotlib import font_manager
 
     if FONT_PATH.exists():
         font_manager.fontManager.addfont(str(FONT_PATH))
-        plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(FONT_PATH)).get_name()
+        font_prop = font_manager.FontProperties(fname=str(FONT_PATH))
+        font_name = font_prop.get_name()
+        plt.rcParams["font.family"] = font_name
+        plt.rcParams["font.sans-serif"] = [font_name]
+        plt.rcParams["mathtext.fontset"] = "custom"
+        plt.rcParams["mathtext.rm"] = font_name
+        plt.rcParams["mathtext.it"] = font_name
+        plt.rcParams["mathtext.bf"] = font_name
+        plt.rcParams["axes.unicode_minus"] = False
+        return font_prop
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
+    return None
 
 
 def collect_attachments(report: dict, analysis_log: list[dict]) -> list[str]:
@@ -888,6 +914,8 @@ def main() -> None:
         st.session_state.default_queries_signature = ""
     if "default_queries" not in st.session_state:
         st.session_state.default_queries = []
+    if "active_uploaded_csv_hash" not in st.session_state:
+        st.session_state.active_uploaded_csv_hash = ""
 
     with st.sidebar:
         st.header("配置")
@@ -904,10 +932,25 @@ def main() -> None:
         csv_path = st.text_input("CSV 文件路径", value=str(DEFAULT_CSV_PATH))
         uploaded_file = st.file_uploader("或上传 CSV", type=["csv"])
         if uploaded_file is not None:
-            upload_path = BASE_DIR / "data" / "uploaded_lesson_data.csv"
+            uploaded_bytes = uploaded_file.getvalue()
+            uploaded_hash = hashlib.md5(uploaded_bytes).hexdigest()[:12]
+            safe_name = Path(uploaded_file.name).name
+            upload_path = BASE_DIR / "data" / f"uploaded_{uploaded_hash}_{safe_name}"
             upload_path.parent.mkdir(exist_ok=True)
-            upload_path.write_bytes(uploaded_file.getvalue())
+            if not upload_path.exists():
+                upload_path.write_bytes(uploaded_bytes)
             csv_path = str(upload_path)
+            if st.session_state.active_uploaded_csv_hash != uploaded_hash:
+                load_dataframe.clear()
+                st.session_state.active_uploaded_csv_hash = uploaded_hash
+                st.session_state.analysis_log = []
+                st.session_state.report = None
+                st.session_state.report_content_html = ""
+                st.session_state.report_sections = []
+                st.session_state.default_queries_signature = ""
+                st.session_state.default_queries = []
+                st.session_state.field_label_signature = ""
+                st.session_state.field_labels = {}
             st.success("已使用上传的 CSV 文件")
 
         st.divider()
