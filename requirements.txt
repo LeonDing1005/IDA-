@@ -1,0 +1,9 @@
+pandas
+streamlit
+matplotlib
+langchain
+langchain-core
+langchain-experimental
+langchain-openai
+tabulate
+zmail
